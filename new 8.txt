@@ -1,0 +1,855 @@
+import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hpe.pace.model.dto.login.AuthErrorRecordResponse;
+import com.hpe.pace.model.dto.login.AuthErrorResponse;
+
+
+@Component
+public class CsrfTokenFilter extends OncePerRequestFilter {
+
+	private CSRFTokenGenerator csrfTokenGen;
+	private final ObjectMapper mapper;
+
+	/**
+	 * @param csrfTokenGen
+	 * @param mapper
+	 */
+	public CsrfTokenFilter(CSRFTokenGenerator csrfTokenGen,
+			ObjectMapper mapper) {
+		this.csrfTokenGen = csrfTokenGen;
+		this.mapper = mapper;
+	}
+
+	@Override
+	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+	        throws ServletException, IOException {
+
+		String csrfToken = request.getHeader("X-XSRF-TOKEN");
+		String emailFromCookie = null;
+		if(request.getCookies() != null){
+            for(Cookie cookie: request.getCookies()){
+                if(cookie.getName().equals("SM_UNIVERSALID")){
+                	emailFromCookie = URLDecoder.decode(cookie.getValue(), StandardCharsets.UTF_8.displayName());
+                }
+            }
+        }
+
+		Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+		if (authentication == null) {
+			if (csrfToken == null || !csrfTokenGen.validateCSRFToken(emailFromCookie, csrfToken)) {
+	        	response.setStatus(HttpStatus.UNAUTHORIZED.value());
+	    		response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+	    		response.setCharacterEncoding(StandardCharsets.UTF_8.displayName());
+
+	    		AuthErrorResponse errResponse = new AuthErrorResponse();
+	    		AuthErrorRecordResponse errRecordResponse = new AuthErrorRecordResponse();
+	    		errRecordResponse.setAuthErrMsg("Unexpected error occured! Please contact administrator!!!!");
+	    		errRecordResponse.setAuthErrDetails("You are not authorized to access. Invalid CSRF Token!.");
+	    		errResponse.setErrRecordResponse(errRecordResponse);
+	    		mapper.writeValue(response.getWriter(), errResponse);
+	            return;
+	        }
+		}
+        filterChain.doFilter(request, response);
+	}
+
+}
+import java.util.Base64;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+import org.springframework.stereotype.Component;
+
+import lombok.extern.slf4j.Slf4j;
+
+ 
+@Component
+@Slf4j
+public class CSRFTokenGenerator {
+
+	private static final String CSRF_SECRET = "abcdefghijklmnopqrstuvwxyz_csrf";
+
+	/**
+	 * @param email
+	 * @return token
+	 * @throws Exception
+	 */
+	public String generateCSRFToken(String email) throws Exception {
+		String csrfToken = "";
+		String emailWithTime = email + "~" + System.currentTimeMillis();
+		Mac mac;
+		try {
+			mac = Mac.getInstance("HmacSHA512");
+	        SecretKeySpec secretKey = new SecretKeySpec(CSRF_SECRET.getBytes(), "HmacSHA512");
+	        mac.init(secretKey);
+	        String signature = Base64.getEncoder().encodeToString(mac.doFinal(emailWithTime.getBytes()));
+	        csrfToken = Base64.getEncoder().encodeToString((emailWithTime + "^" + signature).getBytes());
+		} catch (Exception e) {
+			log.error("generateCSRFToken() - exception: {}", e.getMessage(), e);
+			throw e;
+		}
+		return csrfToken;
+	}
+
+	/**
+	 * @param email
+	 * @param token
+	 * @return boolean validToken
+	 */
+	public boolean validateCSRFToken(String email, String token) {
+	    try {
+	        byte[] decodedBytes = Base64.getDecoder().decode(token);
+	        String[] splitArr = new String(decodedBytes).split("\\^");
+	        if (splitArr.length != 2) return false;
+	        String emailWithTime = splitArr[0];
+	        String signature = splitArr[1];
+	        Mac mac = Mac.getInstance("HmacSHA512");
+	        SecretKeySpec secretKey = new SecretKeySpec(CSRF_SECRET.getBytes(), "HmacSHA512");
+	        mac.init(secretKey);
+	        String computedSignature = Base64.getEncoder().encodeToString(mac.doFinal(emailWithTime.getBytes()));
+	        return signature.equals(computedSignature) && emailWithTime.startsWith(email + "~");
+	    } catch (Exception e) {
+	        return false;
+	    }
+	}
+
+}
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.web.authentication.AuthenticationFailureHandler;
+import org.springframework.stereotype.Component;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hpe.pace.model.dto.login.LoginErrorRecordResponse;
+import com.hpe.pace.model.dto.login.LoginErrorResponse;
+
+ 
+@Component
+public class CustomAuthenticationFailureHandler implements AuthenticationFailureHandler {
+
+	private final ObjectMapper mapper;
+
+	public CustomAuthenticationFailureHandler(ObjectMapper mapper) {
+		this.mapper = mapper;
+	}
+
+	@Override
+	public void onAuthenticationFailure(HttpServletRequest request, HttpServletResponse response,
+	        AuthenticationException exception) throws IOException, ServletException {
+		response.setStatus(HttpStatus.UNAUTHORIZED.value());
+		response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+		response.setCharacterEncoding(StandardCharsets.UTF_8.displayName());
+
+		LoginErrorResponse errResponse = new LoginErrorResponse();
+		LoginErrorRecordResponse errRecordResponse = new LoginErrorRecordResponse();
+		errRecordResponse.setLoginErrMsgString(exception.getMessage());
+		errResponse.setErrRecordResponse(errRecordResponse);
+		mapper.writeValue(response.getWriter(), errResponse);
+	}
+
+}
+import java.io.IOException;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.stereotype.Component;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hpe.pace.model.dto.login.LoginResponse;
+
+import lombok.extern.slf4j.Slf4j;
+
+ 
+@Component
+@Slf4j
+public class CustomAuthenticationSuccessHandler implements AuthenticationSuccessHandler {
+
+	private final ObjectMapper mapper;
+	private final UserService userService;
+
+	public CustomAuthenticationSuccessHandler(final ObjectMapper mapper,
+			final JwtTokenGenerator jwtTokenGen,
+			final UserService userService) {
+		this.mapper = mapper;
+		this.userService = userService;
+	}
+
+	@Override
+	public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response,
+	        Authentication authentication) throws IOException, ServletException {
+		User user = (User) authentication.getPrincipal();
+		LoginResponse responseObject = null;
+		try {
+			responseObject = userService.getUser(user.getUsername());
+		} catch (Exception e) {
+			log.error("onAuthenticationSuccess() - error: {}", e.getMessage(), e);
+		}
+        mapper.writeValue(response.getWriter(), responseObject);
+	}
+
+}
+import java.security.SecureRandom;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.context.annotation.Primary;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+ 
+@Configuration
+@EnableWebSecurity
+public class InternalSecurityConfig {
+
+	@Autowired
+    private PaceUserDetailsService userDetailsService;
+
+	@Autowired
+	private JwtTokenFilter jwtTokenFilter;
+
+	@Autowired
+	private CsrfTokenFilter csrfTokenFilter;
+
+	@Lazy
+	@Autowired
+	private LoginAuthenticationFilter loginAuthFilter;
+
+	public static final String[] PERMIT_ALL_URLS = { "/swagger-ui/**", "/v3/api-docs/**" };
+	public static final String LOGIN_URL = "/login/retrieveUser";
+	public static final String AUTH_URL = "/pace-internal/**";
+
+	@Bean
+	@Primary
+	public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+		http.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.NEVER)
+	        .and()
+	        .csrf().disable()
+	        .httpBasic().disable()
+	        .authenticationProvider(authenticationProvider())
+	        .authorizeRequests()
+	        .antMatchers(LOGIN_URL).permitAll()
+	        .antMatchers(PERMIT_ALL_URLS).permitAll()
+	        .antMatchers(AUTH_URL).authenticated()
+	        .and()
+	        .addFilterBefore(loginAuthFilter, UsernamePasswordAuthenticationFilter.class)
+	        .addFilterBefore(csrfTokenFilter, UsernamePasswordAuthenticationFilter.class)
+	        .addFilterBefore(jwtTokenFilter, UsernamePasswordAuthenticationFilter.class);
+		return http.build();
+	}
+
+	@Bean
+	public DaoAuthenticationProvider authenticationProvider() {
+		DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
+		authProvider.setUserDetailsService(userDetailsService);
+		authProvider.setPasswordEncoder(passwordEncoder());
+		return authProvider;
+	}
+
+	@Bean
+	public PasswordEncoder passwordEncoder() {
+		return new BCryptPasswordEncoder(15, new SecureRandom());
+	}
+
+	@Bean
+	@Primary
+	public AuthenticationManager authenticationManager(AuthenticationConfiguration configuration)
+			throws Exception {
+		return configuration.getAuthenticationManager();
+	}
+
+}
+import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import com.fasterxml.jackson.core.exc.StreamWriteException;
+import com.fasterxml.jackson.databind.DatabindException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Throwables;
+import com.hpe.pace.model.dto.login.AuthErrorRecordResponse;
+import com.hpe.pace.model.dto.login.AuthErrorResponse;
+
+import io.jsonwebtoken.ExpiredJwtException;
+
+
+@Component
+public class JwtTokenFilter extends OncePerRequestFilter {
+
+	private JwtTokenGenerator jwtTokenGen;
+	private PaceUserDetailsService paceUserService;
+	private final ObjectMapper mapper;
+
+	/**
+	 * @param jwtTokenGen
+	 * @param paceUserService
+	 * @param mapper
+	 */
+	public JwtTokenFilter(JwtTokenGenerator jwtTokenGen,
+			PaceUserDetailsService paceUserService,
+			ObjectMapper mapper) {
+		this.jwtTokenGen = jwtTokenGen;
+		this.paceUserService = paceUserService;
+		this.mapper = mapper;
+	}
+
+	@Override
+	protected void doFilterInternal(HttpServletRequest request,
+			HttpServletResponse response, FilterChain filterChain)
+	        throws ServletException, IOException {
+		String authorizationHeader = request.getHeader("authToken");
+		String email = null;
+		String emailFromCookie = null;
+		if(request.getCookies() != null){
+            for(Cookie cookie: request.getCookies()){
+                if(cookie.getName().equals("SM_UNIVERSALID")){
+                	emailFromCookie = URLDecoder.decode(cookie.getValue(), StandardCharsets.UTF_8.displayName());
+                }
+            }
+        }
+
+		if (authorizationHeader != null && !authorizationHeader.isEmpty()) {
+			try {
+				email = jwtTokenGen.extractUsername(authorizationHeader);
+				if (emailFromCookie != null && !email.equals(emailFromCookie)) {
+					throw new Exception("You are not authorized to access. Invalid JWT Token!.");
+				}
+			} catch (IllegalArgumentException e) {
+				String err = Throwables.getStackTraceAsString(e);
+				handleInvalidToken(response, err.substring(0, 500));
+			} catch (ExpiredJwtException e) {
+				String err = Throwables.getStackTraceAsString(e);
+				handleInvalidToken(response, err.substring(0, 500));
+			} catch (Exception e) {
+				String err = Throwables.getStackTraceAsString(e);
+				handleInvalidToken(response, err.substring(0, 500));
+			}
+		}
+
+		Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+		if (email != null && authentication == null
+				&& (emailFromCookie != null && email.equals(emailFromCookie))) {
+			UserDetails userDetails = paceUserService.loadUserByUsername(email);
+			if (jwtTokenGen.validateToken(authorizationHeader, userDetails)) {
+				UsernamePasswordAuthenticationToken authenticationToken = new UsernamePasswordAuthenticationToken(
+						userDetails.getUsername(), userDetails.getUsername());
+				authenticationToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                SecurityContextHolder.getContext().setAuthentication(authenticationToken);
+			}
+			filterChain.doFilter(request, response);
+		}
+	}
+
+	/**
+	 * @param response
+	 * @param exceptionMsg
+	 * @throws StreamWriteException
+	 * @throws DatabindException
+	 * @throws IOException
+	 */
+	private void handleInvalidToken(HttpServletResponse response, String exceptionMsg)
+			throws StreamWriteException, DatabindException, IOException {
+		response.setStatus(HttpStatus.UNAUTHORIZED.value());
+		response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+		response.setCharacterEncoding(StandardCharsets.UTF_8.displayName());
+
+		AuthErrorResponse errResponse = new AuthErrorResponse();
+		AuthErrorRecordResponse errRecordResponse = new AuthErrorRecordResponse();
+		errRecordResponse.setAuthErrMsg("Unexpected error occured! Please contact administrator!!!!");
+		errRecordResponse.setAuthErrDetails(exceptionMsg);
+		errResponse.setErrRecordResponse(errRecordResponse);
+		mapper.writeValue(response.getWriter(), errResponse);
+	}
+
+}
+import java.io.Serializable;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.stereotype.Component;
+
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
+
+
+@Component
+public class JwtTokenGenerator implements Serializable {
+
+	private static final long serialVersionUID = 1L;
+	private static final String SECRET = "abcdefghijklmnopqrstuvwxyz";
+
+	/**
+	 * @param email
+	 * @return token
+	 */
+	public String generateToken(String email) {
+		Map<String, Object> claims = new HashMap<>();
+		return createToken(claims, email);
+	}
+
+	/**
+	 * @param claims
+	 * @param email
+	 * @return String jwtToken
+	 */
+	private String createToken(Map<String, Object> claims, String email) {
+		return Jwts.builder().setClaims(claims).setSubject(email)
+				.setIssuedAt(new Date(System.currentTimeMillis()))
+				.setExpiration(new Date(new Date().getTime() + TimeUnit.HOURS.toMillis(20)))
+				.signWith(SignatureAlgorithm.HS512, SECRET).compact();
+	}
+
+	/**
+	 * @param token
+	 * @return username
+	 */
+	public String extractUsername(String token) {
+        return extractClaim(token, Claims::getSubject);
+    }
+
+	/**
+	 * @param token
+	 * @return date
+	 */
+	public Date extractExpiration(String token) {
+        return extractClaim(token, Claims::getExpiration);
+    }
+
+	/**
+	 * @param <T>
+	 * @param token
+	 * @param claimsResolver
+	 * @return
+	 */
+    public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
+        final Claims claims = extractAllClaims(token);
+        return claimsResolver.apply(claims);
+    }
+
+    /**
+     * @param token
+     * @return Claims
+     */
+    private Claims extractAllClaims(String token) {
+        return Jwts.parser()
+                .setSigningKey(SECRET)
+                .parseClaimsJws(token)
+                .getBody();
+    }
+
+    /**
+     * @param token
+     * @return Boolean
+     */
+    private Boolean isTokenExpired(String token) {
+        return extractExpiration(token).before(new Date());
+    }
+
+    /**
+     * @param token
+     * @param userDetails
+     * @return Boolean
+     */
+    public Boolean validateToken(String token, UserDetails userDetails) {
+        final String username = extractUsername(token);
+        return (username.equals(userDetails.getUsername()) && !isTokenExpired(token));
+    }
+
+}
+import java.io.IOException;
+
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.authentication.AbstractAuthenticationProcessingFilter;
+import org.springframework.security.web.authentication.AuthenticationFailureHandler;
+import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+import org.springframework.stereotype.Component;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hpe.pace.model.dto.login.LoginRequest;
+
+ 
+@Component
+public class LoginAuthenticationFilter extends AbstractAuthenticationProcessingFilter {
+
+	private final AuthenticationSuccessHandler authSuccessHandler;
+	private final AuthenticationFailureHandler authFailureHandler;
+
+	@Autowired
+	private AuthenticationManager authManager;
+
+	/**
+	 * @param authenticationManager
+	 * @param authSuccessHandler
+	 * @param authFailureHandler
+	 */
+	protected LoginAuthenticationFilter(
+			AuthenticationManager authenticationManager,
+			AuthenticationSuccessHandler authSuccessHandler,
+			AuthenticationFailureHandler authFailureHandler) {
+		super(new AntPathRequestMatcher("/login/**"));
+        setAuthenticationManager(authenticationManager);
+        this.authSuccessHandler = authSuccessHandler;
+        this.authFailureHandler = authFailureHandler;
+    }
+
+	@Override
+	public Authentication attemptAuthentication(HttpServletRequest request, HttpServletResponse response)
+	        throws AuthenticationException, IOException, ServletException {
+		ObjectMapper objectmapper = new ObjectMapper();
+		LoginRequest loginRequest = objectmapper.readValue(request.getReader(), LoginRequest.class);
+		String email = null;
+		if (loginRequest.getUserName() != null && !loginRequest.getUserName().isEmpty()) {
+			email = loginRequest.getUserName();
+		} else {
+			throw new BadCredentialsException("No email address");
+		}
+
+		try {
+			return authManager.authenticate(
+					new UsernamePasswordAuthenticationToken(email, email));
+		} catch (BadCredentialsException e) {
+			throw new BadCredentialsException("You are not authorized  to access! "
+						+ email
+						+ " is not configured in the system. Please contact the system administrator.");
+		}
+	}
+
+	@Override
+    protected void successfulAuthentication(HttpServletRequest request, HttpServletResponse response,
+    		FilterChain filterChain, Authentication authResult) throws IOException, ServletException {
+		authSuccessHandler.onAuthenticationSuccess(request, response, authResult);
+	}
+
+	@Override
+	protected void unsuccessfulAuthentication(HttpServletRequest request, HttpServletResponse response,
+	        AuthenticationException failed) throws IOException, ServletException {
+		SecurityContextHolder.clearContext();
+		authFailureHandler.onAuthenticationFailure(request, response, failed);
+	}
+
+}
+import java.util.ArrayList;
+import java.util.Collection;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.stereotype.Service;
+
+import com.hpe.pace.persistence.dao.login.PaceUserDao;
+
+
+@Service
+public class PaceUserDetailsService implements UserDetailsService {
+
+	@Autowired
+	PaceUserDao userDao;
+
+	@Override
+	public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
+		String emailFromPace = userDao.findUserByEmail(email);
+		if (emailFromPace == null) {
+			throw new UsernameNotFoundException(email + " is not found");
+		}
+		return new User(emailFromPace, new BCryptPasswordEncoder().encode(emailFromPace),
+				(Collection<? extends GrantedAuthority>) new ArrayList<GrantedAuthority>());
+	}
+
+}
+import java.security.GeneralSecurityException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import com.hpe.pace.model.dto.login.ConditionArray;
+import com.hpe.pace.model.dto.login.ConditionObject;
+import com.hpe.pace.model.dto.login.ConditionRule;
+import com.hpe.pace.model.dto.login.LoginResponse;
+import com.hpe.pace.model.dto.login.LoginResponseRecord;
+import com.hpe.pace.model.dto.login.LoginUserDto;
+import com.hpe.pace.model.dto.login.RoleModuleDetails;
+import com.hpe.pace.model.dto.login.SchemeFunctionDetails;
+import com.hpe.pace.model.dto.login.UserDetailsResponse;
+import com.hpe.pace.model.dto.login.UserRegionCountryDto;
+import com.hpe.pace.model.dto.login.UserRegionResponse;
+import com.hpe.pace.model.dto.login.UserRoleModuleDetailsDto;
+import com.hpe.pace.persistence.dao.login.PaceUserDao;
+
+import lombok.extern.slf4j.Slf4j;
+
+
+@Service
+@Slf4j
+public class UserService {
+
+	@Autowired
+	private PaceUserDao userDao;
+
+	@Autowired
+	private JwtTokenGenerator jwtTokenGen;
+
+	@Autowired
+	private CSRFTokenGenerator csrfTokenGen;
+
+	/**
+	 * @param email
+	 * @return LoginResponse
+	 * @throws Exception 
+	 * @throws GeneralSecurityException 
+	 */
+	public LoginResponse getUser(String email) throws Exception {
+		LoginResponse response = new LoginResponse();
+		LoginResponseRecord responseRecord = new LoginResponseRecord();
+
+		UserDetailsResponse userDetails = getUserDetails(email);
+
+		responseRecord.setUserDetails(userDetails);
+
+		responseRecord.setToken(getToken(email));
+
+		List<UserRoleModuleDetailsDto> roleModuleDetails = getUserRoleModuleDetails(userDetails.getRoleId());
+
+		responseRecord.setRoleModuleDetails(prepareRoleModuleDetails(roleModuleDetails));
+
+		responseRecord.setSchemeFunctionDetails(prepareSchemeFunctionDetails(roleModuleDetails));
+
+		response.setResponseRecord(responseRecord);
+		return response;
+	}
+
+	/**
+	 * @param roleId
+	 * @return List<UserRoleModuleDetailsDto>
+	 */
+	private List<UserRoleModuleDetailsDto> getUserRoleModuleDetails(String roleId) {
+		List<UserRoleModuleDetailsDto> list = new ArrayList<>();
+		try {
+			list = userDao.getRoleModuleDetails(roleId);
+		} catch (Exception e) {
+			log.error("getUserRoleModuleDetails() - error: {}", e.getMessage(), e);
+			throw e;
+		}
+		return list;
+	}
+
+	/**
+	 * @param List<UserRoleModuleDetailsDto>
+	 * @return List<RoleModuleDetails>
+	 */
+	private List<RoleModuleDetails> prepareRoleModuleDetails(List<UserRoleModuleDetailsDto> list) {
+		List<RoleModuleDetails> preparedList = new ArrayList<>();
+		Set<RoleModuleDetails> preparedSet = new HashSet<>();
+		list.stream().forEach(record -> {
+			RoleModuleDetails rmd = new RoleModuleDetails();
+			rmd.setModuleId(record.getModuleId());
+			rmd.setModuleName(record.getName());
+			rmd.setMenuType(record.getType());
+			rmd.setParentModuleId(record.getParentModuleId());
+			rmd.setRoleModuleId(record.getRoleModuleId());
+			rmd.setActionUrl(record.getActionName());
+			rmd.setMenuItemIndex(record.getMenuItemIndex());
+			preparedSet.add(rmd);
+		});
+		preparedList = preparedSet.stream().collect(Collectors.toList());
+		return preparedList;
+	}
+
+	/**
+	 * @param List<UserRoleModuleDetailsDto>
+	 * @return List<SchemeFunctionDetails>
+	 */
+	private List<SchemeFunctionDetails> prepareSchemeFunctionDetails(List<UserRoleModuleDetailsDto> list) {
+		Map<String, List<UserRoleModuleDetailsDto>> groupedActionModuleRule = list.stream()
+				.filter(f -> f.getActionModuleRule()!=null)
+				.collect(Collectors.groupingBy(UserRoleModuleDetailsDto::getActionModuleRule));
+
+		List<SchemeFunctionDetails> schemeFuncList = new ArrayList<>();
+
+		groupedActionModuleRule.entrySet().stream().forEach(r -> {
+			SchemeFunctionDetails schemeFuncObj = new SchemeFunctionDetails();
+			schemeFuncObj.setSchemeAction(r.getKey());
+
+			r.getValue().stream().forEach(value -> {
+				schemeFuncObj.setDisplayName(value.getName());
+				schemeFuncObj.setModuleId(value.getModuleId());
+			});
+
+			List<ConditionRule> cRList = new ArrayList<>();
+
+			r.getValue().stream()
+			.filter(f -> f.getActionModuleRule()!=null)
+			.collect(Collectors.groupingBy(UserRoleModuleDetailsDto::getRuleName))
+			.entrySet().stream().forEach(crObj -> {
+
+				ConditionRule cr = new ConditionRule();
+				cr.setRuleName(crObj.getKey());
+
+				ConditionObject co = new ConditionObject();
+				List<ConditionArray> cArrList = new ArrayList<>();
+
+				crObj.getValue().stream().forEach(c -> {
+					co.setRuleOperator(c.getRuleOperator());
+					ConditionArray cArr = new ConditionArray();
+					cArr.setName(c.getModuleRuleName());
+					cArr.setValue(c.getValue());
+					cArr.setCondition(c.getCondition());
+					cArrList.add(cArr);
+				});
+				co.setConditionArray(cArrList);
+				cr.setConditionObject(co);
+				cRList.add(cr);
+			});
+			schemeFuncObj.setConditionRules(cRList);
+			schemeFuncList.add(schemeFuncObj);
+		});
+		return schemeFuncList;
+	}
+
+	/**
+	 * @param email
+	 * @return UserDetailsResponse
+	 */
+	private UserDetailsResponse getUserDetails(String email) {
+		UserDetailsResponse userObject = new UserDetailsResponse();
+		try {
+			LoginUserDto user = userDao.getUserDetails(email);
+
+			userObject.setUserId(String.valueOf(user.getUserId()));
+			userObject.setEmailAddress(user.getEmailAddress());
+			userObject.setFirstName(user.getFirstName());
+			userObject.setLastName(user.getLastName());
+			userObject.setRoleId(String.valueOf(user.getRoleId()));
+			userObject.setUserStatus(user.getUserStatus());
+			userObject.setRoleName(user.getRoleName());
+
+			List<UserRegionResponse> userRegion = new ArrayList<>();
+
+			List<UserRegionCountryDto> userRegionCtryList = userDao.getUserRegion(email);
+
+			Map<String, List<UserRegionCountryDto>> groupedRegionMap = userRegionCtryList.stream()
+										.collect(Collectors.groupingBy(UserRegionCountryDto::getRegion));
+
+			groupedRegionMap.entrySet().stream().forEach(r -> {
+				UserRegionResponse obj = new UserRegionResponse();
+				obj.setRegionName(r.getKey());
+
+				List<Map<String, String>> countryList = new ArrayList<>();
+				List<UserRegionCountryDto> list = r.getValue();
+				list.stream().forEach(ctry -> {
+					Map<String, String> countryMap = new HashMap<>();
+					countryMap.put("Country_Name", ctry.getCountry());
+					countryList.add(countryMap);
+				});
+				obj.setCountryList(countryList);
+				userRegion.add(obj);
+			});
+			userObject.setRegion(userRegion);
+		} catch (Exception e) {
+			log.error("getUserDetails() - error: {}", e.getMessage(), e);
+			throw e;
+		}
+    	return userObject;
+	}
+
+	private Map<String, String> getToken(String email) throws Exception {
+		Map<String, String> token = new HashMap<>();
+		token.put("JWT", jwtTokenGen.generateToken(email));
+		token.put("CSRF", csrfTokenGen.generateCSRFToken(email));
+		return token;
+	}
+
+}
+explain everything that is important to be remembered.
+
+
+
+
+
+
+
+
+
+
