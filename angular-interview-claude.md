@@ -1933,3 +1933,273 @@ export const productResolver: ResolveFn<Product> = (route) => {
 ---
 
 > **Tip for interviews**: Always relate concepts to real use cases — "I use `switchMap` for search because it cancels stale HTTP requests", "I use `OnPush` + immutable updates to prevent performance issues in large lists", "I prefer `async` pipe over manual subscriptions to prevent memory leaks."
+
+---
+
+# Exception Handling in Angular — Interview Ready
+
+## 1. Local `try/catch` (Synchronous)
+
+The most basic form — use for synchronous code or `async/await`.
+
+```typescript
+getData() {
+  try {
+    const result = JSON.parse(someString); // risky op
+    return result;
+  } catch (error) {
+    console.error('Parsing failed:', error);
+    return null;
+  }
+}
+
+// With async/await
+async fetchUser(id: number) {
+  try {
+    const user = await this.http.get(`/api/user/${id}`).toPromise();
+    return user;
+  } catch (error) {
+    this.notificationService.show('Failed to load user');
+    throw error; // re-throw if caller needs to know
+  }
+}
+```
+
+> **Interview point:** `try/catch` does NOT catch errors inside RxJS Observables — that needs `catchError`.
+
+---
+
+## 2. RxJS `catchError` (Observable Streams)
+
+The primary way to handle HTTP/stream errors in Angular services and components.
+
+```typescript
+// In a service
+getUsers(): Observable<User[]> {
+  return this.http.get<User[]>('/api/users').pipe(
+    catchError((error: HttpErrorResponse) => {
+      if (error.status === 404) {
+        return of([]); // graceful fallback
+      }
+      return throwError(() => new Error('Server error'));
+    })
+  );
+}
+
+// In a component
+this.userService.getUsers().subscribe({
+  next: (users) => this.users = users,
+  error: (err) => this.errorMessage = err.message
+});
+```
+
+> **Interview point:** Always return `of(fallback)` or `throwError(...)` from `catchError` — never return `void`, or the stream breaks.
+
+---
+
+## 3. `HttpInterceptor` — Centralized HTTP Error Handling
+
+The **industry-standard** approach. One place handles all HTTP errors globally.
+
+```typescript
+@Injectable()
+export class ErrorInterceptor implements HttpInterceptor {
+  constructor(private authService: AuthService, private router: Router) {}
+
+  intercept(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
+    return next.handle(req).pipe(
+      catchError((error: HttpErrorResponse) => {
+        switch (error.status) {
+          case 401:
+            this.authService.logout();
+            this.router.navigate(['/login']);
+            break;
+          case 403:
+            this.router.navigate(['/forbidden']);
+            break;
+          case 500:
+            this.router.navigate(['/server-error']);
+            break;
+        }
+        return throwError(() => error);
+      })
+    );
+  }
+}
+
+// Register in app.module.ts
+providers: [
+  { provide: HTTP_INTERCEPTORS, useClass: ErrorInterceptor, multi: true }
+]
+```
+
+> **Interview point:** `multi: true` is mandatory — it appends to the interceptor chain instead of replacing it.
+
+---
+
+## 4. `GlobalErrorHandler` — Uncaught Runtime Errors
+
+Catches anything that slips through — null refs, type errors, unhandled promise rejections.
+
+```typescript
+@Injectable()
+export class GlobalErrorHandler implements ErrorHandler {
+  constructor(private injector: Injector) {}
+
+  handleError(error: any): void {
+    const router = this.injector.get(Router);
+
+    if (error instanceof HttpErrorResponse) {
+      // HTTP errors (already handled by interceptor usually)
+      console.error('HTTP Error:', error.message);
+    } else {
+      // Client-side runtime errors
+      console.error('Unexpected Error:', error);
+      router.navigate(['/error']);
+    }
+
+    // Optionally push to monitoring (Sentry, Datadog)
+    // this.monitoringService.logError(error);
+  }
+}
+
+// Register in app.module.ts
+providers: [
+  { provide: ErrorHandler, useClass: GlobalErrorHandler }
+]
+```
+
+> **Interview point:** Use `Injector` here instead of direct constructor injection — `ErrorHandler` is instantiated before most services, causing circular dependency issues.
+
+---
+
+## 5. `subscribe()` Error Callback
+
+Component-level stream error handling — the `error` callback in subscribe.
+
+```typescript
+// Old style (avoid)
+this.service.getData().subscribe(
+  data => this.data = data,
+  error => this.handleError(error)  // ⚠️ deprecated positional args
+);
+
+// Modern style (Angular 14+)
+this.service.getData().subscribe({
+  next: (data) => this.data = data,
+  error: (err) => {
+    this.isLoading = false;
+    this.errorMsg = err.message;
+  },
+  complete: () => this.isLoading = false
+});
+```
+
+---
+
+## 6. `retry` / `retryWhen` — Transient Failures
+
+For network blips, retry before showing an error.
+
+```typescript
+import { retry, catchError } from 'rxjs/operators';
+
+getOrders(): Observable<Order[]> {
+  return this.http.get<Order[]>('/api/orders').pipe(
+    retry({ count: 3, delay: 1000 }),  // retry 3x with 1s delay
+    catchError(err => {
+      this.notify.error('Orders unavailable after 3 retries');
+      return of([]);
+    })
+  );
+}
+```
+
+---
+
+## 7. Template-Level Error Handling (`*ngIf` + error state)
+
+Surface errors to the user in the template.
+
+```typescript
+// Component
+errorMessage: string | null = null;
+isLoading = false;
+
+loadData() {
+  this.isLoading = true;
+  this.service.getData().subscribe({
+    next: (data) => { this.data = data; this.isLoading = false; },
+    error: (err) => { this.errorMessage = err.message; this.isLoading = false; }
+  });
+}
+```
+
+```html
+<div *ngIf="isLoading">Loading...</div>
+<div *ngIf="errorMessage" class="error-banner">{{ errorMessage }}</div>
+<div *ngIf="!isLoading && !errorMessage">
+  <!-- actual content -->
+</div>
+```
+
+---
+
+## 8. Route-Level Error Handling (`Resolve` + Guards)
+
+Handle errors before the route even activates.
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class UserResolver implements Resolve<User> {
+  resolve(route: ActivatedRouteSnapshot): Observable<User> {
+    return this.userService.getUser(route.params['id']).pipe(
+      catchError(() => {
+        this.router.navigate(['/not-found']);
+        return EMPTY; // prevent route activation
+      })
+    );
+  }
+}
+```
+
+---
+
+## The Complete Mental Map
+
+```
+HTTP Error (4xx/5xx)
+    └── HttpInterceptor          ← centralized, auth/redirect logic
+
+Observable stream error
+    └── catchError in pipe()     ← service/component level fallback
+    └── subscribe({ error })     ← component-level UI feedback
+
+Uncaught runtime error (null ref, etc.)
+    └── GlobalErrorHandler       ← last resort, logging/monitoring
+
+Transient network failure
+    └── retry()                  ← before catchError
+
+Route data failure
+    └── Resolver + EMPTY         ← prevent broken page activation
+
+User-visible errors
+    └── Template *ngIf + state   ← UX layer
+```
+
+---
+
+## Key Interview Q&A
+
+**Q: Difference between `catchError` and `subscribe({ error })`?**
+`catchError` is in the pipeline — it can recover and keep the stream alive. `subscribe error` is terminal — the stream is already dead.
+
+**Q: Why use `Injector` in `GlobalErrorHandler`?**
+Angular initializes `ErrorHandler` very early, before the DI tree is ready. Direct injection causes circular dependency. `Injector.get()` defers resolution to runtime.
+
+**Q: Can `HttpInterceptor` and `GlobalErrorHandler` both fire?**
+Yes, if the interceptor re-throws with `throwError(...)`, it propagates up and `GlobalErrorHandler` catches it. Design them to have distinct responsibilities.
+
+**Q: What does `EMPTY` do in a resolver?**
+It completes the Observable without emitting — the route never activates, avoiding a broken view.
