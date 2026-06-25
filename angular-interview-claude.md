@@ -2203,3 +2203,863 @@ Yes, if the interceptor re-throws with `throwError(...)`, it propagates up and `
 
 **Q: What does `EMPTY` do in a resolver?**
 It completes the Observable without emitting — the route never activates, avoiding a broken view.
+
+---
+
+# Missing Topics — Angular Interview Supplement
+
+---
+
+## 21. State Management
+
+**Q: How to manage shared state in Angular?**
+
+For simple apps use a `BehaviorSubject` service. For complex apps use NgRx.
+
+```typescript
+// Simple state service (recommended for most apps)
+@Injectable({ providedIn: 'root' })
+export class CartStateService {
+  private cartItems = new BehaviorSubject<CartItem[]>([]);
+  cartItems$ = this.cartItems.asObservable();
+  cartCount$ = this.cartItems$.pipe(map(items => items.length));
+  cartTotal$ = this.cartItems$.pipe(
+    map(items => items.reduce((sum, item) => sum + item.price, 0))
+  );
+
+  addItem(item: CartItem) {
+    this.cartItems.next([...this.cartItems.getValue(), item]);
+  }
+
+  removeItem(id: number) {
+    this.cartItems.next(this.cartItems.getValue().filter(i => i.id !== id));
+  }
+
+  clearCart() {
+    this.cartItems.next([]);
+  }
+}
+
+// In component
+@Component({ template: `
+  <p>Items: {{ cartCount$ | async }}</p>
+  <p>Total: {{ cartTotal$ | async | currency }}</p>
+`})
+export class HeaderComponent {
+  cartCount$ = this.cartState.cartCount$;
+  cartTotal$ = this.cartState.cartTotal$;
+
+  constructor(private cartState: CartStateService) {}
+}
+```
+
+> **Interview point:** BehaviorSubject service is sufficient for most Angular apps. NgRx adds boilerplate — justify it only for large teams or complex state flows.
+
+---
+
+## 22. Memory Leak Prevention
+
+**Q: What causes memory leaks and how to prevent them?**
+
+```typescript
+// Problem: manual subscriptions not cleaned up
+@Component({ template: `{{ data }}` })
+export class LeakyComponent implements OnInit {
+  data: any;
+
+  ngOnInit() {
+    // ❌ This subscription lives forever even after component destroys
+    interval(1000).subscribe(v => this.data = v);
+  }
+}
+
+// Fix 1: takeUntilDestroyed (Angular 16+ — cleanest approach)
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+
+@Component({ template: `{{ data }}` })
+export class CleanComponent {
+  data: any;
+
+  constructor() {
+    interval(1000).pipe(
+      takeUntilDestroyed()  // auto-links to component lifecycle
+    ).subscribe(v => this.data = v);
+  }
+}
+
+// Fix 2: DestroyRef (Angular 16+)
+export class CleanComponent implements OnInit {
+  constructor(private destroyRef: DestroyRef) {}
+
+  ngOnInit() {
+    const sub = interval(1000).subscribe(v => console.log(v));
+    this.destroyRef.onDestroy(() => sub.unsubscribe());
+  }
+}
+
+// Fix 3: async pipe in template (always preferred)
+// users$ = this.userService.getUsers();
+// Template: {{ users$ | async }}
+```
+
+> **Interview point:** `takeUntilDestroyed()` is the modern Angular 16+ standard. `async` pipe is always preferred over manual subscriptions in templates.
+
+---
+
+## 23. Component Communication Patterns
+
+**Q: All ways to communicate between components?**
+
+```typescript
+// 1. @Input / @Output (Parent ↔ Child) — covered in section 3
+
+// 2. Shared Service with BehaviorSubject (Sibling / Any)
+// — covered in section 21
+
+// 3. ViewChild — Parent accesses child directly
+@Component({ template: `<app-child #child></app-child>` })
+export class ParentComponent {
+  @ViewChild('child') child!: ChildComponent;
+
+  callChildMethod() {
+    this.child.doSomething(); // direct method call
+  }
+}
+
+// 4. EventEmitter via service (publish/subscribe)
+@Injectable({ providedIn: 'root' })
+export class EventBusService {
+  private eventSubject = new Subject<{ type: string; payload: any }>();
+  events$ = this.eventSubject.asObservable();
+
+  emit(type: string, payload: any) {
+    this.eventSubject.next({ type, payload });
+  }
+}
+
+// Publisher
+this.eventBus.emit('USER_UPDATED', { id: 1, name: 'Alice' });
+
+// Subscriber (any component)
+this.eventBus.events$.pipe(
+  filter(e => e.type === 'USER_UPDATED'),
+  takeUntilDestroyed()
+).subscribe(e => this.user = e.payload);
+
+// 5. Router — pass data via state
+this.router.navigate(['/detail'], { state: { product } });
+// Receive:
+const product = history.state.product;
+```
+
+---
+
+## 24. Dynamic Components
+
+**Q: How to create components dynamically at runtime?**
+
+```typescript
+// Angular 13+ (ViewContainerRef approach)
+@Component({
+  template: `
+    <button (click)="loadChart()">Load Chart</button>
+    <ng-container #container></ng-container>
+  `
+})
+export class DashboardComponent {
+  @ViewChild('container', { read: ViewContainerRef }) container!: ViewContainerRef;
+
+  async loadChart() {
+    const { ChartComponent } = await import('./chart/chart.component');
+    this.container.clear();
+    const ref = this.container.createComponent(ChartComponent);
+    ref.instance.data = [1, 2, 3]; // pass inputs
+    ref.instance.title = 'Sales';
+  }
+}
+```
+
+> **Interview point:** Used for modals, tooltips, dynamic dashboards, and plugin-style UIs. Pair with lazy import for best performance.
+
+---
+
+## 25. Angular CLI & Build
+
+**Q: Important Angular CLI commands?**
+
+```bash
+ng new my-app --standalone          # create new standalone app
+ng generate component user          # create component (ng g c user)
+ng generate service user            # create service (ng g s user)
+ng generate guard auth              # create guard (ng g g auth)
+ng generate pipe truncate           # create pipe
+ng generate module admin --routing  # create module with routing
+
+ng serve                            # dev server (localhost:4200)
+ng serve --port 4300                # custom port
+ng build                            # build for production
+ng build --configuration=staging    # custom env
+ng test                             # run unit tests (Karma/Jest)
+ng e2e                              # end-to-end tests
+ng lint                             # run ESLint
+ng update @angular/core @angular/cli # update Angular
+```
+
+**Q: What is the purpose of `angular.json`?**
+
+Configures build targets, environments, assets, styles, scripts, and output paths.
+
+```json
+{
+  "projects": {
+    "my-app": {
+      "architect": {
+        "build": {
+          "configurations": {
+            "production": { "optimization": true, "sourceMap": false },
+            "staging": { "fileReplacements": [{ "replace": "environment.ts", "with": "environment.staging.ts" }] }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## 26. Testing (Unit Testing)
+
+**Q: How to test Angular components and services?**
+
+```typescript
+// Component test
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
+
+describe('UserComponent', () => {
+  let component: UserComponent;
+  let fixture: ComponentFixture<UserComponent>;
+  let userService: jasmine.SpyObj<UserService>;
+
+  beforeEach(async () => {
+    const spy = jasmine.createSpyObj('UserService', ['getUsers']);
+
+    await TestBed.configureTestingModule({
+      declarations: [UserComponent],
+      providers: [{ provide: UserService, useValue: spy }]
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(UserComponent);
+    component = fixture.componentInstance;
+    userService = TestBed.inject(UserService) as jasmine.SpyObj<UserService>;
+  });
+
+  it('should display users from service', () => {
+    userService.getUsers.and.returnValue(of([{ id: 1, name: 'Alice' }]));
+
+    fixture.detectChanges(); // triggers ngOnInit
+
+    const items = fixture.debugElement.queryAll(By.css('li'));
+    expect(items.length).toBe(1);
+    expect(items[0].nativeElement.textContent).toContain('Alice');
+  });
+
+  it('should show error message on failure', () => {
+    userService.getUsers.and.returnValue(throwError(() => new Error('API down')));
+    fixture.detectChanges();
+
+    const error = fixture.debugElement.query(By.css('.error'));
+    expect(error.nativeElement.textContent).toContain('API down');
+  });
+});
+
+// Service test
+describe('UserService', () => {
+  let service: UserService;
+  let httpMock: HttpTestingController;
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      imports: [HttpClientTestingModule],
+      providers: [UserService]
+    });
+    service = TestBed.inject(UserService);
+    httpMock = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => httpMock.verify()); // ensure no outstanding requests
+
+  it('should GET users', () => {
+    service.getUsers().subscribe(users => {
+      expect(users.length).toBe(2);
+    });
+
+    const req = httpMock.expectOne('/api/users');
+    expect(req.request.method).toBe('GET');
+    req.flush([{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }]);
+  });
+});
+```
+
+> **Interview point:** Use `HttpClientTestingModule` + `HttpTestingController` for HTTP service tests. Use `jasmine.createSpyObj` to mock dependencies in component tests.
+
+---
+
+## 27. `DestroyRef` & `takeUntilDestroyed` (Angular 16+)
+
+**Q: What is DestroyRef?**
+
+A DI token that lets you register cleanup callbacks tied to a component/directive/service lifecycle — without implementing `OnDestroy`.
+
+```typescript
+@Component({ template: '' })
+export class MyComponent {
+  constructor(private destroyRef: DestroyRef) {
+    // Register any cleanup
+    this.destroyRef.onDestroy(() => {
+      console.log('Component destroyed — cleanup here');
+    });
+  }
+}
+
+// takeUntilDestroyed() uses DestroyRef internally
+@Component({ template: '' })
+export class MyComponent {
+  users: User[] = [];
+
+  constructor(private userService: UserService) {
+    this.userService.getUsers().pipe(
+      takeUntilDestroyed() // no ngOnDestroy needed
+    ).subscribe(users => this.users = users);
+  }
+}
+```
+
+---
+
+## 28. `@defer` Blocks (Angular 17+)
+
+**Q: What is `@defer` and when to use it?**
+
+Lazy-loads a component template chunk only when needed — great for below-the-fold content.
+
+```html
+<!-- Load when element enters viewport -->
+@defer (on viewport) {
+  <app-heavy-chart [data]="chartData" />
+} @placeholder {
+  <div class="skeleton" style="height:300px"></div>
+} @loading (minimum 500ms) {
+  <app-spinner />
+} @error {
+  <p>Failed to load chart.</p>
+}
+
+<!-- Load after 2 seconds idle -->
+@defer (on idle; after 2s) {
+  <app-recommendations />
+}
+
+<!-- Load on user interaction -->
+@defer (on interaction) {
+  <app-comments />
+}
+
+<!-- Load when condition is true -->
+@defer (when isLoggedIn) {
+  <app-user-dashboard />
+}
+```
+
+> **Interview point:** `@defer` is Angular's answer to React's `Suspense`. It splits the bundle automatically — no manual `loadComponent` needed.
+
+---
+
+## 29. Environment Configuration
+
+**Q: How to manage environments in Angular?**
+
+```typescript
+// src/environments/environment.ts (dev)
+export const environment = {
+  production: false,
+  apiUrl: 'http://localhost:3000/api',
+  featureFlag: true
+};
+
+// src/environments/environment.prod.ts
+export const environment = {
+  production: true,
+  apiUrl: 'https://api.myapp.com',
+  featureFlag: false
+};
+
+// In service — same import works in all environments
+import { environment } from '../environments/environment';
+
+@Injectable({ providedIn: 'root' })
+export class ApiService {
+  private baseUrl = environment.apiUrl;
+
+  getUsers() {
+    return this.http.get(`${this.baseUrl}/users`);
+  }
+}
+```
+
+```json
+// angular.json — file replacement at build time
+"fileReplacements": [
+  { "replace": "src/environments/environment.ts",
+    "with": "src/environments/environment.prod.ts" }
+]
+```
+
+> Build: `ng build --configuration=production` swaps the file automatically.
+
+
+---
+
+## 30. Interceptors — Advanced Patterns
+
+**Q: How to add a loading spinner via interceptor?**
+
+```typescript
+@Injectable()
+export class LoadingInterceptor implements HttpInterceptor {
+  private activeRequests = 0;
+
+  constructor(private loadingService: LoadingService) {}
+
+  intercept(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
+    if (this.activeRequests === 0) this.loadingService.show();
+    this.activeRequests++;
+
+    return next.handle(req).pipe(
+      finalize(() => {
+        this.activeRequests--;
+        if (this.activeRequests === 0) this.loadingService.hide();
+      })
+    );
+  }
+}
+```
+
+**Q: How to clone and modify a request?**
+
+```typescript
+// Requests are immutable — always clone
+const modified = req.clone({
+  url: req.url.replace('http://', 'https://'),
+  setHeaders: { Authorization: `Bearer ${token}` },
+  setParams: { version: 'v2' }
+});
+return next.handle(modified);
+```
+
+> **Interview point:** Interceptors run in order of registration for requests, and in reverse order for responses.
+
+---
+
+## 31. `@HostListener` vs `fromEvent` (RxJS)
+
+**Q: When to use each for DOM events?**
+
+```typescript
+// @HostListener — simple, declarative, directive-friendly
+@Directive({ selector: '[appClickTrack]' })
+export class ClickTrackDirective {
+  @HostListener('click', ['$event'])
+  onClick(event: MouseEvent) {
+    console.log('Clicked at', event.clientX, event.clientY);
+  }
+
+  @HostListener('window:scroll', ['$event'])
+  onScroll() {
+    console.log('Window scrolled');
+  }
+}
+
+// fromEvent — use when you need RxJS operators (debounce, filter, etc.)
+@Component({ template: `<input #searchInput />` })
+export class SearchComponent implements AfterViewInit {
+  @ViewChild('searchInput') inputRef!: ElementRef;
+
+  ngAfterViewInit() {
+    fromEvent<InputEvent>(this.inputRef.nativeElement, 'input').pipe(
+      debounceTime(300),
+      map(e => (e.target as HTMLInputElement).value),
+      distinctUntilChanged(),
+      switchMap(query => this.searchService.search(query)),
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(results => this.results = results);
+  }
+}
+```
+
+---
+
+## 32. Renderer2 vs Direct DOM Access
+
+**Q: Why use Renderer2 instead of direct `nativeElement` manipulation?**
+
+```typescript
+// ❌ Direct DOM — breaks SSR (Angular Universal), unsafe
+constructor(private el: ElementRef) {}
+ngOnInit() {
+  this.el.nativeElement.style.color = 'red'; // not SSR safe
+}
+
+// ✅ Renderer2 — SSR safe, platform-agnostic
+constructor(private el: ElementRef, private renderer: Renderer2) {}
+ngOnInit() {
+  this.renderer.setStyle(this.el.nativeElement, 'color', 'red');
+  this.renderer.addClass(this.el.nativeElement, 'active');
+  this.renderer.setAttribute(this.el.nativeElement, 'aria-label', 'Close');
+  this.renderer.listen(this.el.nativeElement, 'click', () => console.log('clicked'));
+}
+```
+
+> **Interview point:** Renderer2 abstracts the DOM — works in server-side rendering (SSR), web workers, and native mobile environments.
+
+---
+
+## 33. Angular Universal (SSR)
+
+**Q: What is Angular Universal?**
+
+Server-Side Rendering (SSR) for Angular — the server pre-renders HTML and sends it to the browser.
+
+```typescript
+// Add SSR to existing app
+ng add @angular/ssr
+
+// Check for platform in code (avoid browser-only APIs in SSR)
+import { isPlatformBrowser, isPlatformServer } from '@angular/common';
+import { PLATFORM_ID } from '@angular/core';
+
+@Component({ template: '' })
+export class MyComponent {
+  constructor(@Inject(PLATFORM_ID) private platformId: Object) {
+    if (isPlatformBrowser(this.platformId)) {
+      // localStorage, window, navigator — browser only
+      localStorage.setItem('key', 'value');
+    }
+    if (isPlatformServer(this.platformId)) {
+      // server-side logic
+    }
+  }
+}
+```
+
+**Benefits:** Faster First Contentful Paint (FCP), better SEO (crawlers see full HTML), social media previews.
+
+---
+
+## 34. `ng-template`, `TemplateRef`, `ViewContainerRef`
+
+**Q: How to render templates programmatically?**
+
+```typescript
+@Component({
+  template: `
+    <ng-template #errorTpl let-msg="message">
+      <div class="alert">⚠️ {{ msg }}</div>
+    </ng-template>
+
+    <ng-template #successTpl let-msg="message">
+      <div class="success">✅ {{ msg }}</div>
+    </ng-template>
+
+    <ng-container #outlet></ng-container>
+    <button (click)="showError()">Show Error</button>
+    <button (click)="showSuccess()">Show Success</button>
+  `
+})
+export class NotificationComponent {
+  @ViewChild('errorTpl') errorTpl!: TemplateRef<any>;
+  @ViewChild('successTpl') successTpl!: TemplateRef<any>;
+  @ViewChild('outlet', { read: ViewContainerRef }) outlet!: ViewContainerRef;
+
+  showError() {
+    this.outlet.clear();
+    this.outlet.createEmbeddedView(this.errorTpl, { message: 'Something went wrong!' });
+  }
+
+  showSuccess() {
+    this.outlet.clear();
+    this.outlet.createEmbeddedView(this.successTpl, { message: 'Saved successfully!' });
+  }
+}
+```
+
+> **Interview point:** This pattern powers reusable modal/toast libraries — the caller passes a `TemplateRef`, the library renders it inside a `ViewContainerRef`.
+
+---
+
+## 35. Reactive Forms — `valueChanges` & `statusChanges`
+
+**Q: How to react to form field changes programmatically?**
+
+```typescript
+@Component({ template: '' })
+export class FilterComponent implements OnInit {
+  filterForm = this.fb.group({
+    search: [''],
+    category: ['all'],
+    priceMin: [0],
+    priceMax: [1000]
+  });
+
+  ngOnInit() {
+    // React to any form change
+    this.filterForm.valueChanges.pipe(
+      debounceTime(300),
+      distinctUntilChanged((a, b) => JSON.stringify(a) === JSON.stringify(b)),
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(filters => this.applyFilters(filters));
+
+    // React to a single control
+    this.filterForm.get('category')!.valueChanges.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(cat => this.loadCategoryData(cat));
+
+    // React to validity changes
+    this.filterForm.statusChanges.subscribe(status => {
+      // status: 'VALID' | 'INVALID' | 'PENDING' | 'DISABLED'
+      this.isFormReady = status === 'VALID';
+    });
+
+    // Programmatically set value without triggering valueChanges
+    this.filterForm.setValue({ search: '', category: 'all', priceMin: 0, priceMax: 1000 },
+      { emitEvent: false }
+    );
+  }
+
+  applyFilters(filters: any) { /* call API */ }
+  loadCategoryData(cat: string) { /* load category */ }
+}
+```
+
+---
+
+## 36. Internationalization (i18n)
+
+**Q: How does Angular handle i18n?**
+
+```html
+<!-- Mark text for translation with i18n attribute -->
+<h1 i18n="@@welcomeTitle">Welcome to our app</h1>
+<p i18n>Hello, {{ username }}!</p>
+<button i18n="submit button|Action button@@submitBtn">Submit</button>
+```
+
+```bash
+# Extract translation messages
+ng extract-i18n --output-path src/locale
+
+# Generates messages.xlf — translate into messages.fr.xlf, messages.de.xlf etc.
+
+# Build for specific locale
+ng build --localize
+ng serve --configuration=fr
+```
+
+```typescript
+// angular.json
+"i18n": {
+  "sourceLocale": "en-US",
+  "locales": {
+    "fr": "src/locale/messages.fr.xlf",
+    "de": "src/locale/messages.de.xlf"
+  }
+}
+```
+
+> **Interview point:** Angular's built-in i18n compiles a separate bundle per locale at build time. For runtime language switching, use `ngx-translate` library instead.
+
+---
+
+## 37. Security in Angular
+
+**Q: How does Angular protect against XSS?**
+
+Angular automatically sanitizes values bound to the DOM. Known as **template security**.
+
+```typescript
+import { DomSanitizer, SafeHtml, SafeUrl } from '@angular/platform-browser';
+
+@Component({
+  template: `
+    <!-- Angular auto-escapes this — XSS safe -->
+    <p>{{ userInput }}</p>
+
+    <!-- [innerHTML] sanitizes HTML automatically -->
+    <div [innerHTML]="htmlContent"></div>
+
+    <!-- If you TRUST the content (use carefully) -->
+    <div [innerHTML]="trustedHtml"></div>
+    <img [src]="trustedUrl" />
+  `
+})
+export class SecurityComponent {
+  userInput = '<script>alert("xss")</script>'; // rendered as text, not executed
+  htmlContent = '<b>Bold text</b>'; // safe HTML, rendered
+  trustedHtml: SafeHtml;
+  trustedUrl: SafeUrl;
+
+  constructor(private sanitizer: DomSanitizer) {
+    // Only use bypassSecurity if you 100% control the content
+    this.trustedHtml = this.sanitizer.bypassSecurityTrustHtml('<b>Trusted</b>');
+    this.trustedUrl = this.sanitizer.bypassSecurityTrustUrl('https://trusted.com/img.png');
+  }
+}
+```
+
+**CSRF Protection:**
+```typescript
+// Angular's HttpClient reads XSRF-TOKEN cookie and sends as X-XSRF-TOKEN header automatically
+// Enable in module:
+imports: [HttpClientXsrfModule.withOptions({
+  cookieName: 'XSRF-TOKEN',
+  headerName: 'X-XSRF-TOKEN'
+})]
+```
+
+> **Interview point:** Angular's XSS protection is on by default — never use `bypassSecurityTrust*` on user input. Only use it on content you generate yourself.
+
+---
+
+## 38. Signal-based Inputs & Outputs (Angular 17.1+)
+
+**Q: What are signal-based inputs?**
+
+New API — inputs are signals instead of decorated properties.
+
+```typescript
+import { Component, input, output, model } from '@angular/core';
+
+@Component({
+  selector: 'app-user-card',
+  template: `
+    <h2>{{ name() }}</h2>
+    <p>Role: {{ role() }}</p>
+    <p>Status: {{ isActive() ? 'Active' : 'Inactive' }}</p>
+    <button (click)="toggle()">Toggle</button>
+  `
+})
+export class UserCardComponent {
+  // Signal inputs (replaces @Input)
+  name = input.required<string>();         // required input
+  role = input<string>('user');            // optional with default
+  isActive = model<boolean>(false);        // two-way bindable signal
+
+  // Signal output (replaces @Output EventEmitter)
+  userClicked = output<string>();
+
+  toggle() {
+    this.isActive.update(v => !v);         // update model signal
+    this.userClicked.emit(this.name());
+  }
+}
+
+// Parent usage
+// <app-user-card [name]="'Alice'" [(isActive)]="activeState" (userClicked)="onUser($event)" />
+```
+
+> **Interview point:** Signal inputs are more performant — they're compatible with `ChangeDetectionStrategy.OnPush` without needing `markForCheck()`. `model()` replaces the `@Input` + `@Output` two-way binding pattern.
+
+---
+
+## 39. Route Data & Static Data Passing
+
+**Q: How to pass static data to routes?**
+
+```typescript
+// Route definition
+const routes: Routes = [
+  {
+    path: 'admin',
+    component: AdminComponent,
+    data: {
+      title: 'Admin Panel',
+      role: 'admin',
+      breadcrumb: 'Administration'
+    }
+  }
+];
+
+// In component — read route data
+@Component({ template: `<h1>{{ title }}</h1>` })
+export class AdminComponent implements OnInit {
+  title = '';
+
+  constructor(private route: ActivatedRoute) {}
+
+  ngOnInit() {
+    this.title = this.route.snapshot.data['title'];
+
+    // Or observable for child routes
+    this.route.data.subscribe(data => {
+      this.title = data['title'];
+    });
+  }
+}
+
+// Practical use: dynamic page titles
+@Injectable({ providedIn: 'root' })
+export class TitleService {
+  constructor(private router: Router, private title: Title) {
+    this.router.events.pipe(
+      filter(e => e instanceof NavigationEnd),
+      map(() => {
+        let route = this.router.routerState.snapshot.root;
+        while (route.firstChild) route = route.firstChild;
+        return route.data['title'] || 'My App';
+      })
+    ).subscribe(title => this.title.setTitle(title));
+  }
+}
+```
+
+---
+
+## 40. Injection Tokens & Multi-Providers
+
+**Q: When to use InjectionToken and multi providers?**
+
+```typescript
+import { InjectionToken, inject } from '@angular/core';
+
+// Typed injection token (replaces OpaqueToken)
+export const APP_CONFIG = new InjectionToken<AppConfig>('APP_CONFIG');
+export const VALIDATORS = new InjectionToken<ValidatorFn[]>('VALIDATORS');
+
+// Provide in module or bootstrap
+providers: [
+  {
+    provide: APP_CONFIG,
+    useValue: { apiUrl: 'https://api.myapp.com', timeout: 5000 }
+  },
+
+  // Multi-provider — collects all values into an array
+  { provide: VALIDATORS, useValue: noWhitespaceValidator, multi: true },
+  { provide: VALIDATORS, useValue: profanityValidator, multi: true },
+  { provide: VALIDATORS, useValue: lengthValidator, multi: true },
+]
+
+// Inject in service
+@Injectable({ providedIn: 'root' })
+export class ApiService {
+  private config = inject(APP_CONFIG);     // modern inject() function
+  private validators = inject(VALIDATORS); // receives array of all validators
+
+  getUsers() {
+    return this.http.get(`${this.config.apiUrl}/users`);
+  }
+}
+```
+
+> **Interview point:** `HTTP_INTERCEPTORS` itself uses `multi: true` — that's why you always provide interceptors with `multi: true`. Each interceptor is an item in the interceptor array.
+
