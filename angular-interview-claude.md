@@ -3063,3 +3063,235 @@ export class ApiService {
 
 > **Interview point:** `HTTP_INTERCEPTORS` itself uses `multi: true` — that's why you always provide interceptors with `multi: true`. Each interceptor is an item in the interceptor array.
 
+---
+
+## 41. `pipe()` in Observables — How It Works
+
+**Q: What is `pipe()` and why do we use it?**
+
+`pipe()` is a method on every Observable that lets you **compose operators** — it takes the raw stream and passes it through a series of transformation/filtering/error-handling functions, returning a new Observable.
+
+```
+Observable.pipe(op1(), op2(), op3())
+  ↓ raw stream
+  → op1 transforms it
+  → op2 transforms that result
+  → op3 transforms that result
+  → final Observable you subscribe to
+```
+
+Nothing runs until `.subscribe()` is called — `pipe()` is lazy.
+
+---
+
+### Basic Structure
+
+```typescript
+import { of, interval } from 'rxjs';
+import { map, filter, take, tap } from 'rxjs/operators';
+
+// Without pipe — unreadable chaining (old RxJS 5 style)
+// observable.map(...).filter(...).take(...)   ← deprecated
+
+// With pipe — clean, composable
+of(1, 2, 3, 4, 5).pipe(
+  filter(n => n % 2 === 0),   // 2, 4
+  map(n => n * 10),           // 20, 40
+  take(1)                     // 20
+).subscribe(val => console.log(val)); // logs: 20
+```
+
+---
+
+### Common Operators Inside `pipe()`
+
+```typescript
+import {
+  map, filter, tap, take, takeUntil, takeWhile,
+  switchMap, mergeMap, concatMap, exhaustMap,
+  catchError, retry,
+  debounceTime, throttleTime, distinctUntilChanged,
+  startWith, scan, reduce,
+  combineLatestWith, withLatestFrom,
+  finalize, share, shareReplay
+} from 'rxjs/operators';
+
+// --- TRANSFORMATION ---
+// map: transform each emitted value
+this.http.get<User[]>('/api/users').pipe(
+  map(users => users.filter(u => u.isActive))  // filter active users
+);
+
+// scan: running accumulator (like Array.reduce but emits on each step)
+clicks$.pipe(
+  scan((count, _) => count + 1, 0)  // running click count: 1, 2, 3...
+);
+
+// startWith: emit an initial value before the source
+this.userService.getUsers().pipe(
+  startWith([])  // emit [] immediately, then emit API response
+);
+
+// --- FILTERING ---
+// filter: only pass values that meet condition
+source$.pipe(filter(val => val > 0));
+
+// distinctUntilChanged: skip if same as previous
+searchInput$.pipe(distinctUntilChanged()); // don't re-search same term
+
+// take(n): complete after n emissions
+interval(1000).pipe(take(5)); // emits 0,1,2,3,4 then completes
+
+// takeWhile: complete when condition becomes false
+source$.pipe(takeWhile(val => val < 100));
+
+// --- SIDE EFFECTS (don't modify stream) ---
+// tap: debug, log, or trigger side effects without changing values
+this.http.get('/api/users').pipe(
+  tap(users => console.log('Got users:', users)),
+  tap(() => this.isLoading = false),
+  map(users => users.filter(u => u.active))
+);
+
+// finalize: runs on complete OR error (like finally block)
+this.http.get('/api/data').pipe(
+  tap(() => this.isLoading = true),
+  finalize(() => this.isLoading = false)  // always runs
+);
+
+// --- COMPLETION CONTROL ---
+// takeUntil: complete when another observable emits
+private destroy$ = new Subject<void>();
+
+interval(1000).pipe(
+  takeUntil(this.destroy$)  // stops when destroy$ emits
+).subscribe();
+
+ngOnDestroy() { this.destroy$.next(); }
+
+// --- ERROR HANDLING ---
+this.http.get('/api/users').pipe(
+  retry(3),                               // retry up to 3 times on error
+  catchError(err => of([]))               // fallback to empty array
+);
+
+// --- MULTICAST (share one subscription among many) ---
+// share: each subscriber gets live values (hot)
+const shared$ = expensiveObs$.pipe(share());
+
+// shareReplay(n): replay last n values to new subscribers (great for caching)
+const users$ = this.http.get<User[]>('/api/users').pipe(
+  shareReplay(1)  // cache last response — new subscribers get it immediately
+);
+```
+
+---
+
+### Real-World Pipe Patterns
+
+```typescript
+// Pattern 1: Search with debounce + cancel stale requests
+searchControl.valueChanges.pipe(
+  debounceTime(300),          // wait 300ms after user stops typing
+  distinctUntilChanged(),     // skip if query hasn't changed
+  filter(q => q.length >= 2), // skip very short queries
+  tap(() => this.isLoading = true),
+  switchMap(q => this.searchService.search(q).pipe(
+    catchError(() => of([]))  // catchError inside switchMap — keeps outer stream alive
+  )),
+  tap(() => this.isLoading = false),
+  takeUntilDestroyed(this.destroyRef)
+).subscribe(results => this.results = results);
+
+// Pattern 2: Poll an API every 5 seconds
+interval(5000).pipe(
+  startWith(0),               // emit immediately, then every 5s
+  switchMap(() => this.http.get<Status>('/api/status')),
+  distinctUntilChanged((a, b) => a.status === b.status), // only update on change
+  takeUntilDestroyed(this.destroyRef)
+).subscribe(status => this.status = status);
+
+// Pattern 3: Cache HTTP response — avoid duplicate calls
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  private users$ = this.http.get<User[]>('/api/users').pipe(
+    shareReplay(1)  // first call hits network, rest get cached response
+  );
+
+  getUsers() { return this.users$; }
+}
+
+// Pattern 4: Combine latest from two streams
+combineLatest([this.users$, this.filter$]).pipe(
+  map(([users, filter]) => users.filter(u => u.role === filter)),
+  takeUntilDestroyed(this.destroyRef)
+).subscribe(filtered => this.filtered = filtered);
+
+// Pattern 5: withLatestFrom — trigger from one, sample the other
+saveBtn$.pipe(
+  withLatestFrom(this.form.valueChanges), // get latest form value on each click
+  switchMap(([_, formValue]) => this.api.save(formValue))
+).subscribe();
+```
+
+---
+
+### `pipe()` — Interview Q&A
+
+**Q: What is the difference between `pipe()` on Observable vs the standalone `pipe()` function?**
+
+```typescript
+import { pipe } from 'rxjs'; // standalone — creates a reusable operator chain
+
+// Reusable pipe — apply the same chain to multiple observables
+const standardHttpPipe = pipe(
+  retry(2),
+  catchError(err => of(null)),
+  tap(res => console.log('Response:', res))
+);
+
+this.http.get('/api/users').pipe(standardHttpPipe).subscribe();
+this.http.get('/api/orders').pipe(standardHttpPipe).subscribe();
+```
+
+**Q: Why does `catchError` go inside `switchMap` sometimes?**
+
+```typescript
+// catchError OUTSIDE switchMap — entire stream dies on error
+source$.pipe(
+  switchMap(v => this.http.get(`/api/${v}`)),
+  catchError(err => of(null))  // stream completes after one error
+);
+
+// catchError INSIDE switchMap — inner stream recovers, outer keeps going
+source$.pipe(
+  switchMap(v => this.http.get(`/api/${v}`).pipe(
+    catchError(err => of(null))  // only THIS inner call fails gracefully
+  ))
+  // outer stream stays alive for next values
+);
+```
+
+> This is a very common interview question — always put `catchError` **inside** `switchMap` if you want the stream to survive errors.
+
+**Q: Is `pipe()` lazy?**
+
+Yes. Operators inside `pipe()` don't execute until `.subscribe()` is called. Each subscription creates a new independent execution.
+
+```typescript
+const result$ = this.http.get('/api/users').pipe(
+  map(users => users.length)
+); // ← nothing happens here, no HTTP call made
+
+result$.subscribe(); // ← HTTP call fires NOW
+result$.subscribe(); // ← another HTTP call fires (use shareReplay to avoid)
+```
+
+**Q: What is the difference between `map` and `tap`?**
+
+| | `map` | `tap` |
+|---|---|---|
+| Modifies stream | Yes — transforms value | No — passes value through unchanged |
+| Use for | Data transformation | Logging, side effects, setting flags |
+| Return value | New transformed value | Ignored — original value passes through |
+
